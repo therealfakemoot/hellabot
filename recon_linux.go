@@ -2,6 +2,7 @@ package hbot
 
 import (
 	"fmt"
+	log "github.com/Sirupsen/logrus"
 	"net"
 
 	"github.com/mudler/sendfd"
@@ -53,7 +54,7 @@ func (irc *Bot) hijackSession() bool {
 	}
 	con, err := net.DialUnix("unix", nil, unaddr)
 	if err != nil {
-		irc.Info("Couldnt restablish connection, no prior bot.", "err", err)
+		irc.Info("Couldnt restablish connection, no prior bot.", log.Fields{"err": err})
 		return false
 	}
 	ncon, err := sendfd.RecvFD(con)

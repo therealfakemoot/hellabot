@@ -9,8 +9,9 @@ import (
 	"time"
 
 	"github.com/sorcix/irc"
-	log "gopkg.in/inconshreveable/log15.v2"
-	logext "gopkg.in/inconshreveable/log15.v2/ext"
+	//log "gopkg.in/inconshreveable/log15.v2"
+	//logext "gopkg.in/inconshreveable/log15.v2/ext"
+	log "github.com/Sirupsen/logrus"
 
 	"bytes"
 	"crypto/tls"
@@ -79,10 +80,10 @@ func NewBot(host, nick string, options ...func(*Bot)) (*Bot, error) {
 	for _, option := range options {
 		option(&bot)
 	}
-	// Discard logs by default
-	bot.Logger = log.New("id", logext.RandId(8), "host", bot.Host, "nick", log.Lazy{bot.getNick})
 
-	bot.Logger.SetHandler(log.DiscardHandler())
+	var logger = log.New()
+	bot.Logger = *logger
+
 	bot.AddTrigger(pingPong)
 	bot.AddTrigger(joinChannels)
 	return &bot, nil
@@ -98,7 +99,7 @@ func (bot *Bot) getNick() string {
 }
 
 func (bot *Bot) connect(host string) (err error) {
-	bot.Debug("Connecting")
+	bot.Debug("Connecting", nil)
 	if bot.SSL {
 		bot.con, err = tls.Dial("tcp", host, &bot.TLSConfig)
 	} else {
@@ -114,7 +115,14 @@ func (bot *Bot) handleIncomingMessages() {
 		// Disconnect if we have seen absolutely nothing for 300 seconds
 		bot.con.SetDeadline(time.Now().Add(bot.PingTimeout))
 		msg := ParseMessage(scan.Text())
-		bot.Debug("Incoming", "raw", scan.Text(), "msg.To", msg.To, "msg.From", msg.From, "msg.Params", msg.Params, "msg.Trailing", msg.Trailing)
+		fields := map[string]interface{}{
+			"raw":          scan.Text(),
+			"msg.To":       msg.To,
+			"msg.From":     msg.From,
+			"msg.Params":   msg.Params,
+			"msg.Trailing": msg.Trailing,
+		}
+		bot.Debug("Incoming message.", fields)
 		for _, t := range bot.triggers {
 			if t.Condition(bot, msg) {
 				go t.Action(bot, msg)
@@ -128,7 +136,10 @@ func (bot *Bot) handleIncomingMessages() {
 // Handles message speed throtling
 func (bot *Bot) handleOutgoingMessages() {
 	for s := range bot.outgoing {
-		bot.Debug("Outgoing", "data", s)
+		fields := map[string]interface{}{
+			"outGoing data": s,
+		}
+		bot.Debug("Outgoing data.", fields)
 		_, err := fmt.Fprint(bot.con, s+"\r\n")
 		if err != nil {
 			bot.Error("handleOutgoingMessages fmt.Fprint error", "err", err)
@@ -141,7 +152,7 @@ func (bot *Bot) handleOutgoingMessages() {
 // SASLAuthenticate performs SASL authentication
 // ref: https://github.com/atheme/charybdis/blob/master/doc/sasl.txt
 func (bot *Bot) SASLAuthenticate(user, pass string) {
-	bot.Debug("Beginning SASL Authentication")
+	bot.Debug("Beginning SASL Authentication", log.Fields{"saslUser": user, "saslPass": pass})
 	bot.Send("CAP REQ :sasl")
 	bot.SetNick(bot.Nick)
 	bot.sendUserCommand(bot.Nick, bot.Nick, "8")
@@ -149,14 +160,14 @@ func (bot *Bot) SASLAuthenticate(user, pass string) {
 	bot.WaitFor(func(mes *Message) bool {
 		return mes.Content == "sasl" && len(mes.Params) > 1 && mes.Params[1] == "ACK"
 	})
-	bot.Debug("Recieved SASL ACK")
+	bot.Debug("Recieved SASL ACK", nil)
 	bot.Send("AUTHENTICATE PLAIN")
 
 	bot.WaitFor(func(mes *Message) bool {
 		return mes.Command == "AUTHENTICATE" && len(mes.Params) == 1 && mes.Params[0] == "+"
 	})
 
-	bot.Debug("Got auth message!")
+	bot.Debug("Got auth message!", nil)
 
 	out := bytes.Join([][]byte{[]byte(user), []byte(user), []byte(pass)}, []byte{0})
 	encpass := base64.StdEncoding.EncodeToString(out)
@@ -181,7 +192,7 @@ func (bot *Bot) StandardRegistration() {
 	if bot.Password != "" {
 		bot.Send("PASS " + bot.Password)
 	}
-	bot.Debug("Sending standard registration")
+	bot.Debug("Sending standard registration", log.Fields{"botUser": bot.Nick, "botPass": bot.Password})
 	bot.sendUserCommand(bot.Nick, bot.Nick, "8")
 	bot.SetNick(bot.Nick)
 }
@@ -199,26 +210,26 @@ func (bot *Bot) SetNick(nick string) {
 
 // Run starts the bot and connects to the server. Blocks until we disconnect from the server.
 func (bot *Bot) Run() {
-	bot.Debug("Starting bot goroutines")
+	bot.Debug("Starting bot goroutines", nil)
 
 	// Attempt reconnection
 	var hijack bool
 	if bot.HijackSession {
 		if bot.SSL {
-			bot.Crit("Can't Hijack a SSL connection")
+			bot.Logger.Error("Can't Hijack a SSL connection")
 			return
 		}
 		hijack = bot.hijackSession()
-		bot.Debug("Hijack", "Did we?", hijack)
+		bot.Debug("Hijack", log.Fields{"hijack": hijack})
 	}
 
 	if !hijack {
 		err := bot.connect(bot.Host)
 		if err != nil {
-			bot.Crit("bot.Connect error", "err", err.Error())
+			bot.Error("bot.Connect error", "err", err.Error())
 			return
 		}
-		bot.Info("Connected successfully!")
+		bot.Info("Connected successfully!", nil)
 	}
 
 	go bot.handleIncomingMessages()
@@ -306,6 +317,32 @@ func (bot *Bot) Close() error {
 		return bot.unixlist.Close()
 	}
 	return nil
+}
+
+func (bot *Bot) Log() (context log.Entry) {
+	return *bot.Logger.WithFields(log.Fields{
+		"server":  bot.Host,
+		"botNick": bot.Nick,
+	})
+}
+
+func (bot *Bot) Info(message string, fields log.Fields) {
+	context := bot.Log()
+	if fields != nil {
+		context.WithFields(fields).Info(message)
+	} else {
+		context.Info(message)
+
+	}
+}
+
+func (bot *Bot) Debug(message string, fields log.Fields) {
+	context := bot.Log()
+	if fields != nil {
+		context.WithFields(fields).Debug(message)
+	} else {
+		context.Debug(message)
+	}
 }
 
 // AddTrigger adds a given trigger to the bots handlers
